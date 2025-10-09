@@ -1,0 +1,534 @@
+---
+title: "Assignment E: Tidying and Transforming Data in R"
+format: html
+editor: visual
+---
+
+In this assignment, you will practice tidying messy datasets and applying tidyverse transformations to prepare data for analysis. You will work with two different real-world datasets:
+
+1.  `World Development Bank Data (economic indicators across years)`
+
+2.  `Movies Data (with multiple values stored in one cell, and multiple linked files)`
+
+Your task is to identify the messy aspects of each dataset and apply tidy R principles (tidyr, dplyr, stringr).
+
+# Description
+
+Before analysis, several messy aspects were identified across the datasets. The World Development Bank data contained non-country metadata rows at the bottom, which were removed to retain only valid country observations. Column names included spaces and were standardized (e.g., `"Country Name"` → `"Country.Name"`) for easier manipulation. Year columns were reshaped into a tidy format using `pivot_longer()` to enable temporal analysis, and unit information was noted separately to preserve measurement context.\
+
+In the movie datasets, titles contained embedded years and inconsistent parentheses, which were separated into distinct `title` and `year` columns. Genre fields with multiple categories separated by `"|"` were split into individual rows for proper analysis. The ratings, tags, and links datasets were examined for missing or inconsistent identifiers, timestamp conversions, and join mismatches. Throughout, data were cleaned, standardized, and reshaped using the `tidyverse` to ensure each variable had its own column and each observation its own row—resulting in a fully tidy, analysis-ready dataset.
+
+### Part 1: World Development Bank Data Dataset
+
+The dataset contains **\~3079 rows and 11 columns.** Each row represents an observation, but the structure is not tidy. Columns include:
+
+-   Series ID and Series Name (currently stored as separate columns), which are variables such as death rate, Access to clean fuels and technologies for cooking, etc.
+
+-   Years as columns (e.g., 2010, 2011, …).
+
+-   Country Code and Country Name
+
+Values under each year column. At the bottom of the file, you will notice notes and metadata (such as units of measure and explanations).
+
+#### Tasks
+
+1.  Import the dataset into R.
+
+    ```{r}
+    library(tidyverse)
+    wd <- read.csv("WDBD.csv", na = c("", "NA"))
+    ```
+
+2.  Remove metadata rows at the bottom (they are useful as documentation, but not tidy data). Remember, this metadata contains some useful info regarding the unit of measure.
+
+    ```{r}
+    library(tidyverse)
+    library(janitor) # Leanred from https://cran.r-project.org/web/packages/janitor/vignettes/janitor.html
+    library(stringr)
+
+    # 1) Read and normalize column names
+    raw <- readr::read_csv("WDBD.csv", na = c("", "NA")) %>% clean_names()
+
+    # 2) find the country name & country code columns (works whether they were "Country Name" or "Country.Name")
+    name_col <- names(raw)[str_detect(names(raw), "country.*name")][1]
+    code_col <- names(raw)[str_detect(names(raw), "country.*code")][1]
+
+    if (is.na(name_col)) stop("Couldn't detect a country name column. Check column names with names(raw).")
+
+    # 3) detect year columns robustly (handles '1960' or 'x1960')
+    year_cols <- names(raw)[sapply(names(raw), function(n) {
+      m <- str_match(n, "^x?(\\d{4})$")
+      !is.na(m[1,2]) && as.integer(m[1,2]) >= 1800 && as.integer(m[1,2]) <= 2100
+    })]
+
+    # 4) build vector(s) of valid country names:
+    #    a) rows that have any non-NA in year columns (real data rows)
+    valid_from_years <- character(0)
+    if (length(year_cols) > 0) {
+      valid_from_years <- raw %>%
+        filter(rowSums(!is.na(select(., all_of(year_cols)))) > 0) %>%
+        pull(!!sym(name_col)) %>%
+        unique() %>% na.omit() %>% str_trim()
+    }
+
+    #    b) also include rows with a valid 3-letter code (covers some cases)
+    valid_from_codes <- character(0)
+    if (!is.na(code_col)) {
+      valid_from_codes <- raw %>%
+        filter(!is.na(.data[[code_col]]) & str_detect(.data[[code_col]], "^[A-Za-z]{3}$")) %>%
+        pull(!!sym(name_col)) %>%
+        unique() %>% na.omit() %>% str_trim()
+    }
+
+    valid_names <- union(valid_from_years, valid_from_codes) %>% sort()
+
+    # 5) Inspect the vector (quick sanity checks)
+    message("Number of candidate valid country names: ", length(valid_names))
+    head(valid_names, 20)
+
+    # 6) Filter original dataset using the vector
+    idx_valid <- str_trim(raw[[name_col]]) %in% valid_names
+    clean_data <- raw[idx_valid, , drop = FALSE]
+    metadata_rows <- raw[!idx_valid, , drop = FALSE]
+
+    # 7) Save the lists so you can edit / inspect them
+    write_lines(valid_names, "valid_country_names.txt")        # editable list
+    write_csv(metadata_rows, "WDBD_extracted_metadata.csv")    # what we removed
+    write_csv(clean_data, "WDBD_clean_data.csv")               # cleaned dataset
+
+    extra_keep <- c("World", "High income") # add any names you want to keep
+    valid_names <- union(valid_names, extra_keep)
+    clean_data <- raw[str_trim(raw[[name_col]]) %in% valid_names, , drop = FALSE]
+
+    valid_names <- read_lines("valid_country_names.txt")
+    clean_data <- raw[str_trim(raw[[name_col]]) %in% valid_names, , drop = FALSE]
+
+    bad_names <- c("Least developed countries: UN classification")  # add more if needed
+
+    clean_data <- clean_data %>%
+      filter(!country_name %in% bad_names)
+    write_csv(clean_data, "WDBD_clean.csv")
+    ```
+
+    ```         
+    ```
+
+    Reshape the dataset:
+
+    ```{r}
+    # Long pivot to gather year columns in a single year 
+    long_data <- clean_data %>%
+      pivot_longer(
+        cols = matches("\\d{4}"),      # match any column name containing 4 digits
+        names_to = "year",
+        values_to = "value"
+      ) %>%
+      mutate(year = as.integer(str_extract(year, "\\d{4}")))  # pull out the 4-digit year
+
+    # Use pivot_wider() if you want to restructure Series IDs and Series Names.
+    wide_data <- long_data %>%
+      pivot_wider(
+        names_from = series_name,   # or use series_code if you prefer short names
+        values_from = value
+      )
+    ```
+
+3.  Handle Units of Measure:
+
+    -   Some values look unusually small, large, or inconsistent.
+
+    -   Think about how you could incorporate units into the dataset (e.g., create a Unit column or keep the metadata separately).
+
+    -   You do not need to fully standardize units, but be ready to explain how you dealt with this problem.
+
+    ```{r}
+    indicator_units <- tibble(
+      series_name = c("GDP (current US$)", "Population, total", "Life expectancy at birth, total (years)"),
+      unit = c("US dollars", "people", "years")
+    )
+
+    long_data_units <- long_data %>%
+      left_join(indicator_units, by = "series_name")
+
+
+    ```
+
+    Because different World Bank indicators use different measurement units (e.g., USD, metric tons, years), we retained the original metadata file to document units of measure. We also added a `unit` column for key indicators where the unit could be inferred directly from the Series Name. We did not attempt to standardize across units, as each indicator is analyzed within its native measurement scale.
+
+    ```{r}
+    # This was done in class 
+    # Read in some data for practice
+    movies <- read.csv("~/Documents/MA-615/Assignmen E/Datasets/movies.csv")
+    rating <- read.csv("~/Documents/MA-615/Assignmen E/Datasets/ratings.csv")
+    link <- read.csv("~/Documents/MA-615/Assignmen E/Datasets/links.csv")
+    tag <- read.csv("~/Documents/MA-615/Assignmen E/Datasets/tags.csv") 
+    ```
+
+### Part 2: Movies Data Dataset (movies.csv)
+
+The dataset includes movie titles with genres stored in one column.
+
+Example:
+
+| movieId | title            | genres                                          |
+|-----------------|-----------------|---------------------------------------|
+| 1       | Toy Story (1995) | Adventure\|Animation\|Children\|Comedy\|Fantasy |
+| 2       | Jumanji (1995)   | Adventure\|Children\|Fantasy                    |
+
+This violates tidy data principles because multiple genres and titles (year) are crammed into one cell.
+
+#### Tasks
+
+1.  Import the dataset into R. (Done)
+
+2.  Use appropriate tidy functions taught in the class to get the different information in one cell into their own cells.
+
+    ```{r}
+    # Let's Seperate the year the movie was released 
+    movies_clean <- movies %>%
+      mutate(
+        # Extract 4-digit year inside the last parentheses
+        year = str_extract(title, "\\(\\d{4}\\)$"),
+        year = str_remove_all(year, "[()]"),  # remove parentheses
+        year = as.integer(year),
+        
+        # Remove the year (and parentheses) from the title 
+        # This part came from chatbot
+        title = str_remove(title, "\\s*\\(\\d{4}\\)$"),
+        title = str_trim(title)
+      )
+    write_csv(movies_clean, "movies_clean.csv")
+    ```
+
+3.  Explore other ways the dataset may need tidying (e.g., column naming, handling missing values).
+
+    ```{r}
+    # Seperate genres in different rows
+    movies_tidy <- movies_clean %>%
+      separate_rows(genres, sep = "\\|") %>%  # split on pipe symbol
+      mutate(genres = str_trim(genres))        # clean up spaces (if any)
+    # Save as CSV
+
+    ```
+
+### Extended Analysis with MovieLens Data
+
+To deepen your tidyverse practice, you will also use the related MovieLens files:
+
+1.  ratings.csv (user ratings of movies)
+2.  tags.csv (user-generated tags)
+3.  links.csv (external identifiers for IMDb and TMDb)
+
+More information about these datasets is provided in README.txt
+
+#### Suggested Explorations
+
+-   **Ratings (ratings.csv)**
+
+1.  Compute the average rating and number of ratings per movie.
+
+    ```{r}
+    movie_summary <- rating %>%
+      group_by(movieId) %>%
+      summarise(
+        avg_rating = mean(rating, na.rm = TRUE),  # average rating per movie
+        num_rating = n()                         # number of ratings per movie
+      ) %>%
+      arrange(desc(num_rating))  # optional: sort by popularity
+    ```
+
+2.  Explore the distribution of ratings across all users.
+
+    ```{r}
+    rating %>%
+      summarise(
+        min_rating = min(rating, na.rm = TRUE),
+        max_rating = max(rating, na.rm = TRUE),
+        mean_rating = mean(rating, na.rm = TRUE),
+        median_rating = median(rating, na.rm = TRUE),
+        sd_rating = sd(rating, na.rm = TRUE)
+      )
+
+    # Use ggplot to visualize the distribution guided with cheat sheet
+    library(ggplot2)
+
+    ggplot(rating, aes(x = rating)) +
+      geom_histogram(binwidth = 1, fill = "steelblue", color = "white") +
+      labs(
+        title = "Distribution of Movie Ratings",
+        x = "Rating",
+        y = "Count"
+      ) +
+      theme_minimal()
+
+
+    ```
+
+    The distribution of ratings across all users shows that most ratings cluster around the higher end of the scale, typically between 3.0 and 4.0. This indicates that users tend to give generally favorable scores rather than extreme low ratings. Very low ratings (below 2.0) are relatively rare, while perfect scores (5.0) occur occasionally but not as frequently as mid-to-high ratings.
+
+3.  Convert timestamp into readable dates and analyze trends over time.
+
+    ```{r}
+    rating <- rating %>%
+      mutate(
+        date = as_datetime(timestamp),     # convert UNIX timestamp to POSIXct date-time
+        date = as_date(date)               # keep only the date part
+      )
+
+    ratings_by_year <- rating %>%
+      mutate(year = year(date)) %>%
+      group_by(year) %>%
+      summarise(
+        avg_rating = mean(rating, na.rm = TRUE),
+        num_ratings = n()
+      )
+
+    write_csv(ratings_by_year, "ratings_clean.csv")
+    ggplot(ratings_by_year, aes(x = year, y = num_ratings)) +
+      geom_line(color = "red") +
+      labs(
+        title = "Number of Ratings Over Time",
+        x = "Month",
+        y = "Number of Ratings"
+      ) +
+      theme_minimal()
+
+    ```
+
+-   **Tags (tags.csv)**
+
+1.  Find the most common tags.
+
+    -   Explore how tagging activity varies across users and movies.
+
+    ```{r}
+    # Convert Timestanmp to a readable date
+    tag <- tag %>%
+      mutate(
+        date = as_datetime(timestamp),
+        date = as_date(date)
+      )
+
+    # Tidy data to find the top ten tags
+    top_tags <- tag %>%
+      group_by(tag) %>%
+      summarise(tag_count = n()) %>%
+      arrange(desc(tag_count))
+
+    # View top 10 tags
+    top_tags %>% slice_head(n = 10)
+
+    # Tagging activity across users
+    tags_by_user <- tag %>%
+      group_by(userId) %>%
+      summarise(num_tags = n())
+
+    tags_by_user %>% slice_head(n = 10)
+    # Tagging activity across movies
+    tags_by_movie <- tag %>%
+      group_by(movieId) %>%
+      summarise(num_tags = n())
+    tags_by_movie %>% slice_head(n = 10)
+
+
+    ```
+
+2.  Join with ratings to see if certain tags are linked with higher ratings.
+
+    ```{r}
+    # Join tags and ratings by userId and MovieId
+    tag_ratings <- tag %>%
+      inner_join(rating, by = c("userId", "movieId"))
+
+    # Compite the average rating by tag2
+    tag_summary <- tag_ratings %>%
+      group_by(tag) %>%
+      summarise(
+        avg_rating = mean(rating, na.rm = TRUE),
+        num_ratings = n()
+      ) %>%
+      arrange(desc(avg_rating))
+
+    # Filter for meaningful tags
+    tag_summary_filtered <- tag_summary %>%
+      filter(num_ratings >= 20) %>%
+      arrange(desc(avg_rating))
+    write_csv(tag_summary_filtered, "tag_summary_filtered.csv")
+
+    # Visualize the tags linked with higher ratings
+    ggplot(tag_summary_filtered %>% slice_max(avg_rating, n = 15),
+           aes(x = reorder(tag, avg_rating), y = avg_rating)) +
+      geom_col(fill = "green") +
+      coord_flip() +
+      labs(
+        title = "Top 15 Tags Associated with Higher Average Ratings",
+        x = "Tag",
+        y = "Average Rating"
+      ) +
+      theme_minimal()
+
+    ```
+
+    There are certain tags that are strongly linked to higher average ratings. User generative tags can be served as useful qualitative indicators of audience sentiment and perceived more quality.
+
+3.  **Links (links.csv)**
+
+<!-- -->
+
+1.  Check for missing identifiers (NA in imdbId or tmdbId).
+
+    ```{r}
+    # Use dplyr to check for missing values in imdbId or tmdbId
+    links_missing <- link %>%
+      filter(is.na(imdbId) | is.na(tmdbId))
+
+    ```
+
+2.  Optionally, discuss how these IDs could allow linking to richer external datasets.
+
+    The `imdbId` and `tmdbId` fields in the links dataset provide powerful connection points to external sources like IMDb and TMDb. These identifiers allow researchers to enrich the MovieLens data with additional metadata such as cast information, production details, budgets, and international ratings. Leveraging these connections enables more comprehensive movie analyses, including exploring the relationship between production factors and audience ratings, enhancing genre classification, and improving movie recommendation algorithms.
+
+#### Cross-dataset analysis
+
+1.  Join ratings.csv and movies.csv to explore genre–rating patterns.
+
+    ```{r}
+    # R will crash whenever I try to join ratings and movies since rating
+    # is already larhge enough
+
+    # Chatbot helped out to sample an amount of rows 
+    set.seed(123)
+    ratings_sample <- rating %>% sample_n(100000)  
+    ratings_movies_sample <- ratings_sample %>% left_join(movies, by = "movieId")
+
+    ratings_genre_sample <- ratings_movies_sample %>%
+      separate_rows(genres, sep = "\\|")
+
+    genre_summary_sample <- ratings_genre_sample %>%
+      group_by(genres) %>%
+      summarise(
+        avg_rating = mean(rating, na.rm = TRUE),
+        n_ratings = n()
+      ) %>%
+      arrange(desc(avg_rating))
+
+
+    ```
+
+2.  Identify top-rated movies (apply a minimum number of ratings filter).
+
+    ```{r}
+    # Compute average rating and number of ratings per movie
+    movie_summary <- rating %>%
+      group_by(movieId) %>%
+      summarise(
+        avg_rating = mean(rating, na.rm = TRUE),
+        n_ratings = n()
+      )
+
+    # Filter movies with at least 50 ratings
+    min_ratings <- 50
+
+    top_movies <- movie_summary %>%
+      filter(n_ratings >= min_ratings) %>%
+      arrange(desc(avg_rating))
+
+    # Join with movie titles
+    top_movies_named <- top_movies %>%
+      left_join(movies, by = "movieId") %>%
+      select(movieId, title, avg_rating, n_ratings)
+
+    # View top 10
+    head(top_movies_named, 10)
+    ```
+
+3.  Compare user preferences by genre.
+
+    ```{r, eval = FALSE}
+    ratings_movies <- rating %>%
+      left_join(movies, by = "movieId") %>%
+      separate_rows(genres, sep = "\\|")   # Split movies with multiple genres
+
+    user_genre_pref <- ratings_movies %>%
+      group_by(userId, genres) %>%
+      summarise(
+        avg_rating = mean(rating, na.rm = TRUE),
+        n_ratings = n(),
+        .groups = "drop"
+      )
+    user_genre_pref_filtered <- user_genre_pref %>%
+      filter(n_ratings >= 5)  # only keep users who rated at least 5 movies in that genre
+    genre_summary <- user_genre_pref_filtered %>%
+      group_by(genres) %>%
+      summarise(
+        avg_user_rating = mean(avg_rating, na.rm = TRUE),
+        total_users = n_distinct(userId)
+      ) %>%
+      arrange(desc(avg_user_rating))
+    genre_summary %>%
+      ggplot(aes(x = reorder(genres, avg_user_rating), y = avg_user_rating)) +
+      geom_col(fill = "steelblue") +
+      coord_flip() +
+      labs(
+        title = "Average User Preference by Genre",
+        x = "Genre",
+        y = "Average User Rating"
+      ) +
+      theme_minimal()
+
+    ```
+
+    When comparing user preferences by genre, we may find that Drama and Film-Noir tend to receive higher average ratings across users, while Horror and Western often receive lower ones. This could reflect differences in storytelling quality, audience expectations, or niche appeal of certain genres.
+
+4.  Explore whether tags like classic or underrated correlate with higher ratings.
+
+    ```{r}
+    tags_ratings <- tag %>%
+      inner_join(rating, by = c("userId", "movieId"))
+
+    # Clean and standarize tags
+    tags_ratings <- tags_ratings %>%
+      mutate(tag = tolower(tag))
+
+    # Identify and summarize target tags
+    target_tags <- tags_ratings %>%
+      filter(str_detect(tag, "classic|underrated")) %>%
+      group_by(tag) %>%
+      summarise(
+        avg_rating = mean(rating, na.rm = TRUE),
+        n_ratings = n()
+      ) %>%
+      arrange(desc(avg_rating))
+
+    overall_avg <- mean(rating$rating, na.rm = TRUE)
+    overall_avg 
+
+    tags_ratings <- tag %>%
+      inner_join(rating, by = c("userId", "movieId")) %>%
+      mutate(tag = tolower(tag)) %>%
+      filter(str_detect(tag, "classic|underrated")) %>%
+      mutate(tag_group = case_when(
+        str_detect(tag, "classic") ~ "classic",
+        str_detect(tag, "underrated") ~ "underrated",
+        TRUE ~ "other"
+      )) %>%
+      group_by(tag_group) %>%
+      summarise(
+        avg_rating = mean(rating, na.rm = TRUE),
+        n_ratings = n()
+      )
+    tags_ratings
+
+    ```
+
+The average rating for movies tagged as classic is 4.22 and underrated at 4.29 which is notibly higher than the overall average of 3.54. This suggest that users tend to give higher ratings to movies they personally label as classic or underrated, indicating these tags often reflect positive user sentiment.
+
+## Submission
+
+Submit an HTML (.html) or Quarto (.qmd) file 2 your code, explanations, and outputs.
+
+Your document should include:
+
+1.  A short description of how you identified messy aspects.
+2.  The tidy transformations you applied (with code).
+3.  A final cleaned dataset for each case.
